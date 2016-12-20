@@ -64,5 +64,6 @@ WHERE status_id = 1;
 ## TODO
 
 - [ ] Error handling/auto retry
+- [ ] Identify "freshness" of backed up files as well
 - [ ] Add File|Directory in the audit database
 - [ ] Make into a proper library
