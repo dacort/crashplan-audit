@@ -5,7 +5,7 @@ require './db'
 
 # The target directory we want to compare against.
 # Defaults to the user's home directory.
-TEST_DIR="$HOME"
+TEST_DIR="#{ENV['HOME']}"
 
 # A list of files or folders in TEST_DIR to explicitly ignore.
 # Typically these are not critical and contain installation packages or caches.
@@ -24,6 +24,7 @@ IGNORE = [
   '.vim',
   '.vscode',
   'Applications',
+  'Dropbox',
 ].map{|p| File.join(TEST_DIR, p)}
 
 # A list of directories to ignore, regardless of where they are.
