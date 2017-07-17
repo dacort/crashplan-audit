@@ -2,6 +2,7 @@ require 'net/http'
 require 'json'
 require 'highline'
 require './db'
+require './lib/crashplan'
 
 # The target directory we want to compare against.
 # Defaults to the user's home directory.
@@ -38,86 +39,34 @@ IGNORE_DIRS = [
 
 # Initialize a database to log our state into.
 @database = DB.new
+@cp = Crashplan.new
 
-# HTTP Request builder for Crashplan API
-def http_request(req, headers={})
-  if headers.has_key?("username") && headers.has_key?("password")
-    req.basic_auth(headers.delete("username"), headers.delete("password"))
-  end
+@cp.login
 
-  req['Content-Type'] = "application/json; charset=UTF-8"
-
-  headers.each{|k,v| req[k] = v}
-
-  return Net::HTTP.start(req.uri.hostname, req.uri.port,:use_ssl => req.uri.scheme == 'https') {|http|
-    http.request(req)
-  }
-end
-
-# HTTP POST requst builder
-def post(url, headers=nil, data=nil)
-  uri = URI(url)
-  req = Net::HTTP::Post.new(uri)
-  req.body = data.to_json if data
-
-  res = http_request(req, headers)
-
-  parsed_body =  JSON.parse(res.body)
-  return parsed_body
-end
-
-# HTTP GET request builder
-def get(url, headers=nil)
-  uri = URI(url)
-  req = Net::HTTP::Get.new(uri)
-
-  res = http_request(req, headers)
-
-  parsed_body =  JSON.parse(res.body)
-  return parsed_body
-end
-
-# Get the username & password
-cli = HighLine.new
-username = cli.ask "Crashplan Username:   "
-password = cli.ask("Crashplan password:   ") { |q| q.echo = "*" }
-
-computers = get(
-  'https://www.crashplan.com/api/Computer?incBackupUsage=true&active=true',
-  {"username" => username, "password" => password},
-)
-
-# Ask the user to select a computer
-computer_names = computers['data']['computers'].collect{|c| c['name']}
-selected_computer_id = cli.ask("Select a computer:\n#{computer_names.collect.with_index{|c,i| "#{i+1}. #{c}"}.join("\n")}\n> ", Integer) { |q| q.in = 1..computer_names.length }
-
-@selected_computer = computers['data']['computers'][selected_computer_id-1]
+@selected_computer = @cp.select_computer
 p @selected_computer
 
-computer_metadata = get(
-  "https://www.crashplan.com/api/Computer/#{@selected_computer['guid']}?idType=guid&incBackupUsage=true&active=true&incSettings=true",
-  {"username" => username, "password" => password}
-)
+computer_metadata = @cp.computer_metadata(@selected_computer['guid'])
 local_paths = computer_metadata['data']['settings']['serviceBackupConfig']['backupConfig']['backupSets']
 
 @exclude_patterns = computer_metadata['data']['settings']['serviceBackupConfig']['backupConfig']['excludeSystem'][0].select{|k,r|
   ['pattern', 'macintosh'].include?(k)
 }.collect{|k,v| v.collect{|item| item['@regex']}}.flatten.compact
 
-@login = post(
+@login = @cp.post(
   'https://www.crashplan.com/api/loginToken',
   {"username" => username, "password" => password},
   {"userId" => "my","sourceGuid" => "#{@selected_computer['guid']}","destinationGuid" => "42"}
 )
 p @login
 
-@storage_creds = post(
+@storage_creds = @cp.post(
   "#{@login['data']['serverUrl']}/api/authToken",
   {"Authorization" => "LOGIN_TOKEN #{@login['data']['loginToken']}"},
 )
 p @storage_creds
 
-datakey = post(
+datakey = @cp.post(
   'https://www.crashplan.com/api/dataKeyToken',
   {"username" => username, "password" => password},
   {"computerGuid" => "#{@selected_computer['guid']}"}
@@ -125,7 +74,7 @@ datakey = post(
 p datakey
 
 passphrase = cli.ask("Crashplan passphrase:   ") { |q| q.echo = "*" }
-@webrestore = post(
+@webrestore = @cp.post(
   "#{@login['data']['serverUrl']}/api/webRestoreSession",
   {"Authorization" => "TOKEN #{@storage_creds['data'].join('-')}"},
   {"computerGuid" => "#{@selected_computer['guid']}","dataKeyToken" => "#{datakey['data']['dataKeyToken']}","privatePassword" => passphrase}
@@ -136,7 +85,7 @@ p @webrestore
 base_file_id = nil
 recurse_params = nil
 loop do
-  resp = get(
+  resp = @cp.get(
     "#{@login['data']['serverUrl']}/api/webRestoreTreeNode?guid=#{@selected_computer['guid']}&webRestoreSessionId=#{@webrestore['data']['webRestoreSessionId']}#{recurse_params}",
     {"Authorization" => "TOKEN #{@storage_creds['data'].join('-')}"}
   )
@@ -153,7 +102,7 @@ end
 def find_missing_files(local_dir, cp_file_id)
   puts "  Examining #{local_dir}"
   my_files = Dir.entries(local_dir)[2..-1].select{|entry| !@exclude_patterns.any?{|p| entry.match(p)}}
-  cp_files = get(
+  cp_files = @cp.get(
     "#{@login['data']['serverUrl']}/account/api/webRestoreTreeNode?guid=#{@selected_computer['guid']}&webRestoreSessionId=#{@webrestore['data']['webRestoreSessionId']}&fileId=#{cp_file_id}&type=directory",
     {"Authorization" => "TOKEN #{@storage_creds['data'].join('-')}"}
   )['data'] # TODO: Better error handling. Always.
